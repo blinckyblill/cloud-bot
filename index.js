@@ -1,4 +1,5 @@
 const OWNER_ID = 8389205143;
+
 import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
 
@@ -34,32 +35,8 @@ bot.on("message", async (msg) => {
     bot.sendMessage(chatId, reply);
 
   } catch (err) {
-    bot.sendMessage(chatId, "Eroare la AI 🤖");
-  }
-
-});
-
-  const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (!text) return;
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are a helpful Telegram assistant." },
-        { role: "user", content: text }
-      ]
-    });
-
-    const reply = response.choices[0].message.content;
-
-    bot.sendMessage(chatId, reply);
-
-  } catch (err) {
     console.log(err);
     bot.sendMessage(chatId, "Eroare la AI 🤖");
   }
-});
 
+});
