@@ -1,7 +1,8 @@
-// index.js (CommonJS) - Railway friendly
-require("dotenv").config();
+// index.js (CommonJS) - Railway friendly, no node-fetch needed
+// Optional local .env support (only if you install dotenv)
+try { require("dotenv").config(); } catch (_) {}
+
 const TelegramBot = require("node-telegram-bot-api");
-const fetch = require("node-fetch");
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID = String(process.env.OWNER_ID || "").trim();
@@ -13,62 +14,27 @@ if (!OWNER_ID) throw new Error("Missing OWNER_ID");
 if (!TWELVE_API_KEY) throw new Error("Missing TWELVE_API_KEY");
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+console.log("✅ Bot started (silver tracker ready). OWNER_ID =", OWNER_ID);
 
-console.log("Bot started (silver tracker ready).");
-
-// --- State (in-memory). On restart it resets.
-// If you want persistence, we can store in a DB or Railway volume.
+// --- State (in-memory)
 const state = {
   silver: {
     enabled: false,
-    mode: "above", // "above" | "below"
-    threshold: null, // number
+    mode: "below",     // "above" | "below"
+    threshold: null,   // number
     lastPrice: null,
     lastAlertAt: 0,
-    lastCross: null, // "above"|"below"|null
+    lastCross: null,   // "above"|"below"|null
   },
 };
 
 function isOwner(msg) {
-  const chatId = String(msg.chat.id);
-  return chatId === OWNER_ID;
-}
-
-async function getXagUsd() {
-  // Twelve Data quote endpoint
-  const url = `https://api.twelvedata.com/quote?symbol=XAG/USD&apikey=${encodeURIComponent(
-    TWELVE_API_KEY
-  )}`;
-
-  const res = await fetch(url, { timeout: 15000 });
-  const data = await res.json();
-
-  // If API returns error
-  if (!res.ok || data.status === "error") {
-    const msg = data?.message || `HTTP ${res.status}`;
-    throw new Error(`TwelveData error: ${msg}`);
-  }
-
-  // quote format: { symbol, name, close, ... } or { price }
-  const priceRaw = data?.close ?? data?.price;
-  const price = Number(priceRaw);
-
-  if (!Number.isFinite(price)) {
-    throw new Error("Invalid price from TwelveData");
-  }
-  return price;
+  // IMPORTANT: compare chat.id with OWNER_ID
+  return String(msg.chat.id) === OWNER_ID;
 }
 
 function formatPrice(p) {
-  return p.toFixed(3);
-}
-
-async function sendOwner(text) {
-  try {
-    await bot.sendMessage(Number(OWNER_ID), text);
-  } catch (e) {
-    console.error("sendMessage failed:", e.message);
-  }
+  return Number(p).toFixed(3);
 }
 
 function parseNumberArg(text) {
@@ -78,35 +44,66 @@ function parseNumberArg(text) {
   return Number.isFinite(n) ? n : null;
 }
 
+async function sendOwner(text) {
+  try {
+    await bot.sendMessage(OWNER_ID, text);
+  } catch (e) {
+    console.error("sendMessage failed:", e.message);
+  }
+}
+
+async function getXagUsd() {
+  // Twelve Data quote endpoint
+  const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(
+    "XAG/USD"
+  )}&apikey=${encodeURIComponent(TWELVE_API_KEY)}`;
+
+  // timeout safe fetch
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15000);
+
+  let res, data;
+  try {
+    res = await fetch(url, { signal: controller.signal });
+    data = await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+
+  if (!res.ok || data?.status === "error") {
+    const msg = data?.message || `HTTP ${res.status}`;
+    throw new Error(`TwelveData error: ${msg}`);
+  }
+
+  const priceRaw = data?.close ?? data?.price;
+  const price = Number(priceRaw);
+
+  if (!Number.isFinite(price)) {
+    throw new Error("Invalid price from TwelveData");
+  }
+  return price;
+}
+
 async function checkSilverOnce() {
   if (!state.silver.enabled) return;
-  if (!state.silver.threshold || !Number.isFinite(state.silver.threshold)) return;
+  if (!Number.isFinite(state.silver.threshold)) return;
 
   const price = await getXagUsd();
   state.silver.lastPrice = price;
 
-  const mode = state.silver.mode; // above/below
   const thr = state.silver.threshold;
-
-  // Determine current side
   const nowSide = price >= thr ? "above" : "below";
+  const targetSide = state.silver.mode === "above" ? "above" : "below";
 
-  // Only alert on crossing into target side
-  // Example: mode=below => alert when crosses from above -> below
-  const targetSide = mode === "above" ? "above" : "below";
-
-  const crossed =
-    state.silver.lastCross !== null &&
-    state.silver.lastCross !== nowSide &&
-    nowSide === targetSide;
-
-  // Initialize lastCross on first run without alert
+  // init lastCross on first run
   if (state.silver.lastCross === null) {
     state.silver.lastCross = nowSide;
     return;
   }
 
-  // Anti-spam: at most one alert per 60s
+  const crossed =
+    state.silver.lastCross !== nowSide && nowSide === targetSide;
+
   const now = Date.now();
   const canAlert = now - state.silver.lastAlertAt > 60_000;
 
@@ -119,14 +116,14 @@ async function checkSilverOnce() {
       `${arrow} XAG/USD a trecut ${dir} prag!\n` +
         `Preț: ${formatPrice(price)}\n` +
         `Prag: ${formatPrice(thr)}\n` +
-        `Mod: ${mode.toUpperCase()}`
+        `Mod: ${state.silver.mode.toUpperCase()}`
     );
   }
 
   state.silver.lastCross = nowSide;
 }
 
-// interval loop
+// loop
 setInterval(async () => {
   try {
     await checkSilverOnce();
@@ -137,17 +134,28 @@ setInterval(async () => {
 
 // --- Commands ---
 bot.on("message", async (msg) => {
-  if (!isOwner(msg)) return;
-
   const text = (msg.text || "").trim();
   if (!text) return;
+
+  // helper: get your chat id
+  if (text === "/id") {
+    return bot.sendMessage(msg.chat.id, `🆔 Chat ID: ${msg.chat.id}`);
+  }
+
+  if (!isOwner(msg)) return;
 
   try {
     if (text === "/start" || text === "start") {
       return bot.sendMessage(
         msg.chat.id,
         "✅ Blinckybot online.\n\nComenzi:\n" +
-          "/silver_on\n/silver_off\n/silver_set 22.50\n/silver_above 22.50\n/silver_below 22.50\n/silver_status\n/silver_now"
+          "/id (îți arată chat id)\n" +
+          "/silver_on\n/silver_off\n" +
+          "/silver_set 22.50\n" +
+          "/silver_above 22.50\n" +
+          "/silver_below 22.50\n" +
+          "/silver_status\n" +
+          "/silver_now"
       );
     }
 
@@ -165,7 +173,7 @@ bot.on("message", async (msg) => {
       const n = parseNumberArg(text);
       if (n === null) return bot.sendMessage(msg.chat.id, "Ex: /silver_set 22.50");
       state.silver.threshold = n;
-      state.silver.lastCross = null; // reset cross detection
+      state.silver.lastCross = null;
       return bot.sendMessage(msg.chat.id, `✅ Prag setat: ${formatPrice(n)} USD`);
     }
 
@@ -175,10 +183,7 @@ bot.on("message", async (msg) => {
       state.silver.mode = "above";
       state.silver.threshold = n;
       state.silver.lastCross = null;
-      return bot.sendMessage(
-        msg.chat.id,
-        `✅ Alert când XAG/USD urcă peste ${formatPrice(n)}`
-      );
+      return bot.sendMessage(msg.chat.id, `✅ Alert când XAG/USD urcă peste ${formatPrice(n)}`);
     }
 
     if (text.startsWith("/silver_below")) {
@@ -187,10 +192,7 @@ bot.on("message", async (msg) => {
       state.silver.mode = "below";
       state.silver.threshold = n;
       state.silver.lastCross = null;
-      return bot.sendMessage(
-        msg.chat.id,
-        `✅ Alert când XAG/USD coboară sub ${formatPrice(n)}`
-      );
+      return bot.sendMessage(msg.chat.id, `✅ Alert când XAG/USD coboară sub ${formatPrice(n)}`);
     }
 
     if (text.startsWith("/silver_now")) {
@@ -205,17 +207,16 @@ bot.on("message", async (msg) => {
         "📊 Silver status:\n" +
           `• Tracking: ${state.silver.enabled ? "ON ✅" : "OFF ⛔"}\n` +
           `• Mod: ${state.silver.mode.toUpperCase()}\n` +
-          `• Prag: ${state.silver.threshold ? formatPrice(state.silver.threshold) : "—"}\n` +
-          `• Ultim preț: ${state.silver.lastPrice ? formatPrice(state.silver.lastPrice) : "—"}\n` +
+          `• Prag: ${Number.isFinite(state.silver.threshold) ? formatPrice(state.silver.threshold) : "—"}\n` +
+          `• Ultim preț: ${Number.isFinite(state.silver.lastPrice) ? formatPrice(state.silver.lastPrice) : "—"}\n` +
           `• Interval: ${Math.max(10, CHECK_INTERVAL_SEC)}s`
       );
     }
 
-    // fallback: ignore or help
     if (text === "/help") {
       return bot.sendMessage(
         msg.chat.id,
-        "Comenzi:\n/silver_on\n/silver_off\n/silver_set 22.50\n/silver_above 22.50\n/silver_below 22.50\n/silver_status\n/silver_now"
+        "Comenzi:\n/id\n/silver_on\n/silver_off\n/silver_set 22.50\n/silver_above 22.50\n/silver_below 22.50\n/silver_status\n/silver_now"
       );
     }
   } catch (err) {
@@ -224,8 +225,7 @@ bot.on("message", async (msg) => {
   }
 });
 
-// If you ever see TELEGRAM 409 conflict in logs:
-// It means another instance is polling too.
-// Fix: stop other deployments/instances or use webhook mode.
 process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e));
 process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
+
+console.log("ℹ️ Tip: dacă vezi TELEGRAM 409 conflict => ai 2 instanțe pornite. Oprește una.");
