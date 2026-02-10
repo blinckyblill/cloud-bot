@@ -7,7 +7,6 @@
 require("dotenv").config();
 
 const TelegramBot = require("node-telegram-bot-api");
-const fetch = require("node-fetch");
 const OpenAI = require("openai");
 
 // ===== ENV =====
@@ -191,3 +190,4 @@ Prag: ${threshold || "-"}`
     console.log("Message error:", e.message);
   }
 });
+
