@@ -1,114 +1,78 @@
-// index.js — SILVER BOT (FREE, no API key, Yahoo Finance)
-
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const fetch = require("node-fetch");
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID = String(process.env.OWNER_ID || "").trim();
-const CHECK_INTERVAL_SEC = Number(process.env.CHECK_INTERVAL_SEC || 60);
-
-if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
-if (!OWNER_ID) throw new Error("Missing OWNER_ID");
+const CHECK_INTERVAL_SEC = 60;
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-console.log("Bot started (Yahoo silver tracker ready)");
+console.log("Bot started (silver tracker FREE API).");
 
-// ============================
-// PRICE FROM YAHOO (FREE)
-// ============================
-async function getSilverPrice() {
-  const url =
-    "https://query1.finance.yahoo.com/v7/finance/quote?symbols=XAGUSD=X";
+let silverEnabled = false;
+let threshold = null;
+let mode = "above";
 
-  const res = await fetch(url);
-  const data = await res.json();
-
-  const price =
-    data.quoteResponse.result[0].regularMarketPrice;
-
-  return Number(price);
+function isOwner(msg) {
+  return String(msg.chat.id) === OWNER_ID;
 }
 
-// ============================
-// STATE
-// ============================
-const state = {
-  enabled: false,
-  threshold: null,
-  mode: "above",
-  lastSide: null
-};
+async function getSilverPrice() {
+  const res = await fetch("https://api.metals.live/v1/spot/silver");
+  const data = await res.json();
 
-// ============================
-// COMMANDS
-// ============================
+  // format: [[timestamp, price]]
+  return Number(data[0][1]);
+}
+
+async function send(text) {
+  await bot.sendMessage(OWNER_ID, text);
+}
+
+async function checkSilver() {
+  if (!silverEnabled || !threshold) return;
+
+  const price = await getSilverPrice();
+
+  if (mode === "above" && price >= threshold)
+    await send(`📈 Silver peste ${threshold}\nPreț: ${price}`);
+
+  if (mode === "below" && price <= threshold)
+    await send(`📉 Silver sub ${threshold}\nPreț: ${price}`);
+}
+
+setInterval(checkSilver, CHECK_INTERVAL_SEC * 1000);
 
 bot.on("message", async (msg) => {
-  if (String(msg.chat.id) !== OWNER_ID) return;
+  if (!isOwner(msg)) return;
 
-  const text = msg.text || "";
+  const t = msg.text;
 
-  if (text === "/start") {
-    return bot.sendMessage(
-      msg.chat.id,
-      "🪙 Silver Bot ready\n\n" +
-      "/silver_on\n/silver_off\n/silver_now\n" +
-      "/silver_above 25\n/silver_below 23"
-    );
+  if (t === "/silver_on") {
+    silverEnabled = true;
+    return send("✅ Silver tracking ON");
   }
 
-  if (text === "/silver_on") {
-    state.enabled = true;
-    return bot.sendMessage(msg.chat.id, "✅ Tracking ON");
+  if (t === "/silver_off") {
+    silverEnabled = false;
+    return send("⛔ Silver tracking OFF");
   }
 
-  if (text === "/silver_off") {
-    state.enabled = false;
-    return bot.sendMessage(msg.chat.id, "⛔ Tracking OFF");
+  if (t.startsWith("/silver_above")) {
+    threshold = Number(t.split(" ")[1]);
+    mode = "above";
+    return send(`Alert peste ${threshold}`);
   }
 
-  if (text === "/silver_now") {
+  if (t.startsWith("/silver_below")) {
+    threshold = Number(t.split(" ")[1]);
+    mode = "below";
+    return send(`Alert sub ${threshold}`);
+  }
+
+  if (t === "/silver_now") {
     const p = await getSilverPrice();
-    return bot.sendMessage(msg.chat.id, `🪙 XAG/USD = ${p}`);
-  }
-
-  if (text.startsWith("/silver_above")) {
-    state.mode = "above";
-    state.threshold = Number(text.split(" ")[1]);
-    return bot.sendMessage(msg.chat.id, `📈 Alert peste ${state.threshold}`);
-  }
-
-  if (text.startsWith("/silver_below")) {
-    state.mode = "below";
-    state.threshold = Number(text.split(" ")[1]);
-    return bot.sendMessage(msg.chat.id, `📉 Alert sub ${state.threshold}`);
+    return send(`🪙 Silver: ${p}`);
   }
 });
-
-// ============================
-// LOOP
-// ============================
-
-setInterval(async () => {
-  if (!state.enabled || !state.threshold) return;
-
-  try {
-    const price = await getSilverPrice();
-
-    const side = price >= state.threshold ? "above" : "below";
-
-    if (state.lastSide && side !== state.lastSide && side === state.mode) {
-      bot.sendMessage(
-        OWNER_ID,
-        `🚨 ALERT\nSilver ${side} ${state.threshold}\nPrice: ${price}`
-      );
-    }
-
-    state.lastSide = side;
-
-  } catch (e) {
-    console.log("fetch error:", e.message);
-  }
-}, CHECK_INTERVAL_SEC * 1000);
