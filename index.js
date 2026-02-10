@@ -1,78 +1,138 @@
+// ===============================
+// BLINCKYBOT – SILVER TRACKER FREE
+// Railway safe • Telegram private
+// ===============================
+
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const fetch = require("node-fetch");
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OWNER_ID = String(process.env.OWNER_ID || "").trim();
-const CHECK_INTERVAL_SEC = 60;
+// ===== ENV =====
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OWNER_ID = String(process.env.OWNER_ID || "");
+const CHECK_INTERVAL = Number(process.env.CHECK_INTERVAL_SEC || 60);
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+if (!TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+if (!OWNER_ID) throw new Error("Missing OWNER_ID");
 
-console.log("Bot started (silver tracker FREE API).");
+// ===== TELEGRAM =====
+const bot = new TelegramBot(TOKEN, { polling: true });
 
-let silverEnabled = false;
+console.log("✅ BlinckyBot started. Owner:", OWNER_ID);
+
+// ===== STATE =====
+let tracking = false;
 let threshold = null;
-let mode = "above";
+let mode = "below"; // below | above
+let lastSide = null;
 
-function isOwner(msg) {
-  return String(msg.chat.id) === OWNER_ID;
-}
-
+// ===== PRICE (FREE API) =====
 async function getSilverPrice() {
   const res = await fetch("https://api.metals.live/v1/spot/silver");
   const data = await res.json();
 
-  // format: [[timestamp, price]]
-  return Number(data[0][1]);
+  // format: [ { silver: 24.33 } ]
+  return Number(data[0].silver);
 }
 
-async function send(text) {
-  await bot.sendMessage(OWNER_ID, text);
+// ===== SECURITY =====
+function isOwner(msg) {
+  return String(msg.chat.id) === OWNER_ID;
 }
 
-async function checkSilver() {
-  if (!silverEnabled || !threshold) return;
+// ===== ALERT LOOP =====
+setInterval(async () => {
+  try {
+    if (!tracking || !threshold) return;
 
-  const price = await getSilverPrice();
+    const price = await getSilverPrice();
 
-  if (mode === "above" && price >= threshold)
-    await send(`📈 Silver peste ${threshold}\nPreț: ${price}`);
+    const side = price >= threshold ? "above" : "below";
 
-  if (mode === "below" && price <= threshold)
-    await send(`📉 Silver sub ${threshold}\nPreț: ${price}`);
-}
+    if (lastSide === null) {
+      lastSide = side;
+      return;
+    }
 
-setInterval(checkSilver, CHECK_INTERVAL_SEC * 1000);
+    if (side !== lastSide && side === mode) {
+      const arrow = mode === "above" ? "📈" : "📉";
 
+      await bot.sendMessage(
+        OWNER_ID,
+        `${arrow} SILVER ALERT\nPret: ${price}\nPrag: ${threshold}`
+      );
+    }
+
+    lastSide = side;
+  } catch (e) {
+    console.log("Price error:", e.message);
+  }
+}, CHECK_INTERVAL * 1000);
+
+// ===== COMMANDS =====
 bot.on("message", async (msg) => {
   if (!isOwner(msg)) return;
 
-  const t = msg.text;
+  const text = msg.text || "";
 
-  if (t === "/silver_on") {
-    silverEnabled = true;
-    return send("✅ Silver tracking ON");
+  // start
+  if (text === "/start") {
+    return bot.sendMessage(
+      OWNER_ID,
+      `BlinckyBot online 🤖
+
+Comenzi:
+/silver_on
+/silver_off
+/silver_now
+/silver_above 25
+/silver_below 23
+/status`
+    );
   }
 
-  if (t === "/silver_off") {
-    silverEnabled = false;
-    return send("⛔ Silver tracking OFF");
+  // ON
+  if (text === "/silver_on") {
+    tracking = true;
+    return bot.sendMessage(OWNER_ID, "✅ Tracking ON");
   }
 
-  if (t.startsWith("/silver_above")) {
-    threshold = Number(t.split(" ")[1]);
-    mode = "above";
-    return send(`Alert peste ${threshold}`);
+  // OFF
+  if (text === "/silver_off") {
+    tracking = false;
+    return bot.sendMessage(OWNER_ID, "⛔ Tracking OFF");
   }
 
-  if (t.startsWith("/silver_below")) {
-    threshold = Number(t.split(" ")[1]);
-    mode = "below";
-    return send(`Alert sub ${threshold}`);
-  }
-
-  if (t === "/silver_now") {
+  // NOW
+  if (text === "/silver_now") {
     const p = await getSilverPrice();
-    return send(`🪙 Silver: ${p}`);
+    return bot.sendMessage(OWNER_ID, `🪙 Silver: ${p}`);
+  }
+
+  // ABOVE
+  if (text.startsWith("/silver_above")) {
+    threshold = Number(text.split(" ")[1]);
+    mode = "above";
+    lastSide = null;
+    return bot.sendMessage(OWNER_ID, `Alert peste ${threshold}`);
+  }
+
+  // BELOW
+  if (text.startsWith("/silver_below")) {
+    threshold = Number(text.split(" ")[1]);
+    mode = "below";
+    lastSide = null;
+    return bot.sendMessage(OWNER_ID, `Alert sub ${threshold}`);
+  }
+
+  // STATUS
+  if (text === "/status") {
+    return bot.sendMessage(
+      OWNER_ID,
+      `Status:
+Tracking: ${tracking}
+Mode: ${mode}
+Prag: ${threshold || "-"}`
+    );
   }
 });
