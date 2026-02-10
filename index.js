@@ -1,222 +1,231 @@
 // index.js (CommonJS) - Railway friendly
-// Required env vars: TELEGRAM_BOT_TOKEN, OWNER_ID (optional but recommended)
-// Optional: OPENAI_API_KEY, OPENAI_MODEL
+require("dotenv").config();
+const TelegramBot = require("node-telegram-bot-api");
+const fetch = require("node-fetch");
 
-const { Telegraf } = require("telegraf");
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OWNER_ID = String(process.env.OWNER_ID || "").trim();
+const TWELVE_API_KEY = process.env.TWELVE_API_KEY;
+const CHECK_INTERVAL_SEC = Number(process.env.CHECK_INTERVAL_SEC || 60);
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+if (!OWNER_ID) throw new Error("Missing OWNER_ID");
+if (!TWELVE_API_KEY) throw new Error("Missing TWELVE_API_KEY");
 
-const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : null;
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+console.log("Bot started (silver tracker ready).");
 
-const bot = new Telegraf(BOT_TOKEN);
+// --- State (in-memory). On restart it resets.
+// If you want persistence, we can store in a DB or Railway volume.
+const state = {
+  silver: {
+    enabled: false,
+    mode: "above", // "above" | "below"
+    threshold: null, // number
+    lastPrice: null,
+    lastAlertAt: 0,
+    lastCross: null, // "above"|"below"|null
+  },
+};
 
-// -------------------- helpers --------------------
-function isOwner(ctx) {
-  if (!OWNER_ID) return true; // if not set, allow everyone (not recommended)
-  const fromId = ctx.from?.id ? String(ctx.from.id) : "";
-  return fromId === OWNER_ID;
-}
-
-function formatPrice(p) {
-  return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(p);
+function isOwner(msg) {
+  const chatId = String(msg.chat.id);
+  return chatId === OWNER_ID;
 }
 
 async function getXagUsd() {
-  // Yahoo Finance - stable, no API key
-  const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=XAGUSD=X";
-  const res = await fetch(url, { method: "GET" });
+  // Twelve Data quote endpoint
+  const url = `https://api.twelvedata.com/quote?symbol=XAG/USD&apikey=${encodeURIComponent(
+    TWELVE_API_KEY
+  )}`;
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Yahoo fetch failed: ${res.status} ${text}`);
+  const res = await fetch(url, { timeout: 15000 });
+  const data = await res.json();
+
+  // If API returns error
+  if (!res.ok || data.status === "error") {
+    const msg = data?.message || `HTTP ${res.status}`;
+    throw new Error(`TwelveData error: ${msg}`);
   }
 
-  const data = await res.json();
-  const price = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
+  // quote format: { symbol, name, close, ... } or { price }
+  const priceRaw = data?.close ?? data?.price;
+  const price = Number(priceRaw);
 
-  if (typeof price !== "number") throw new Error("Silver price unavailable from Yahoo");
+  if (!Number.isFinite(price)) {
+    throw new Error("Invalid price from TwelveData");
+  }
   return price;
 }
 
-async function askOpenAI(userText) {
-  if (!OPENAI_API_KEY) return null;
-
-  const body = {
-    model: OPENAI_MODEL,
-    messages: [
-      {
-        role: "system",
-        content:
-          "Ești un asistent util pentru viața de zi cu zi. Răspunde scurt, clar, în română. Dacă utilizatorul cere sfaturi financiare/trading, dă doar informații generale și amintește să folosească management de risc.",
-      },
-      { role: "user", content: userText },
-    ],
-    temperature: 0.4,
-  };
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const err = await res.text().catch(() => "");
-    throw new Error(`OpenAI error: ${res.status} ${err}`);
-  }
-
-  const data = await res.json();
-  const answer = data?.choices?.[0]?.message?.content?.trim();
-  return answer || "Nu am un răspuns acum.";
+function formatPrice(p) {
+  return p.toFixed(3);
 }
 
-// -------------------- state (RAM) --------------------
-// NOTE: Railway container can restart; these settings reset if service restarts.
-// If you want persistence, we can add a DB later.
-const watch = {
-  enabled: false,
-  chatId: null,
-  below: null,
-  above: null,
-  lastPrice: null,
-  lastAlertAt: 0,
-};
-
-// spam protection
-const ALERT_COOLDOWN_MS = 60 * 1000; // 1 min between alerts
-
-async function sendWatchStatus(chatId) {
-  const parts = [];
-  parts.push(`📌 Silver tracking: ${watch.enabled ? "ON ✅" : "OFF ❌"}`);
-  parts.push(`⬇️ watch_below: ${watch.below ?? "-"}`);
-  parts.push(`⬆️ watch_above: ${watch.above ?? "-"}`);
-  parts.push(`🪙 lastPrice: ${watch.lastPrice ? formatPrice(watch.lastPrice) : "-"}`);
-  await bot.telegram.sendMessage(chatId, parts.join("\n"));
-}
-
-async function tickWatch() {
-  if (!watch.enabled || !watch.chatId) return;
-
+async function sendOwner(text) {
   try {
-    const price = await getXagUsd();
-    watch.lastPrice = price;
-
-    const now = Date.now();
-    const canAlert = now - watch.lastAlertAt > ALERT_COOLDOWN_MS;
-
-    if (canAlert && typeof watch.below === "number" && price <= watch.below) {
-      watch.lastAlertAt = now;
-      await bot.telegram.sendMessage(
-        watch.chatId,
-        `🔔 Silver a scăzut sub prag!\n🪙 XAG/USD: ${formatPrice(price)}\n⬇️ Prag: ${watch.below}`
-      );
-    }
-
-    if (canAlert && typeof watch.above === "number" && price >= watch.above) {
-      watch.lastAlertAt = now;
-      await bot.telegram.sendMessage(
-        watch.chatId,
-        `🔔 Silver a trecut peste prag!\n🪙 XAG/USD: ${formatPrice(price)}\n⬆️ Prag: ${watch.above}`
-      );
-    }
+    await bot.sendMessage(Number(OWNER_ID), text);
   } catch (e) {
-    // don’t crash bot on price errors
-    // You can check logs in Railway
-    console.error("Watch tick error:", e?.message || e);
+    console.error("sendMessage failed:", e.message);
   }
 }
 
-// run every 60s
-setInterval(tickWatch, 60 * 1000);
+function parseNumberArg(text) {
+  const parts = text.trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  const n = Number(parts[1].replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
 
-// -------------------- commands --------------------
-bot.start(async (ctx) => {
-  await ctx.reply(
-    "Salut! ✅ Sunt Blinckybot.\n\nComenzi:\n/silver_now\n/watch_below 28.50\n/watch_above 30\n/watch_status\n/watch_off\n\nTrimite și un mesaj normal și îți răspund (dacă ai OPENAI_API_KEY)."
-  );
-});
+async function checkSilverOnce() {
+  if (!state.silver.enabled) return;
+  if (!state.silver.threshold || !Number.isFinite(state.silver.threshold)) return;
 
-bot.command("silver_now", async (ctx) => {
-  try {
-    const price = await getXagUsd();
-    await ctx.reply(`🪙 XAG/USD acum: ${formatPrice(price)}`);
-  } catch (e) {
-    await ctx.reply(`❌ Nu pot lua prețul acum. (${e?.message || "error"})`);
+  const price = await getXagUsd();
+  state.silver.lastPrice = price;
+
+  const mode = state.silver.mode; // above/below
+  const thr = state.silver.threshold;
+
+  // Determine current side
+  const nowSide = price >= thr ? "above" : "below";
+
+  // Only alert on crossing into target side
+  // Example: mode=below => alert when crosses from above -> below
+  const targetSide = mode === "above" ? "above" : "below";
+
+  const crossed =
+    state.silver.lastCross !== null &&
+    state.silver.lastCross !== nowSide &&
+    nowSide === targetSide;
+
+  // Initialize lastCross on first run without alert
+  if (state.silver.lastCross === null) {
+    state.silver.lastCross = nowSide;
+    return;
   }
-});
 
-bot.command("watch_below", async (ctx) => {
-  if (!isOwner(ctx)) return ctx.reply("⛔ Doar owner-ul poate seta tracking-ul.");
-  const parts = ctx.message.text.split(" ").map((s) => s.trim()).filter(Boolean);
-  const val = Number(parts[1]);
-  if (!Number.isFinite(val)) return ctx.reply("Exemplu: /watch_below 28.50");
+  // Anti-spam: at most one alert per 60s
+  const now = Date.now();
+  const canAlert = now - state.silver.lastAlertAt > 60_000;
 
-  watch.enabled = true;
-  watch.chatId = ctx.chat.id;
-  watch.below = val;
+  if (crossed && canAlert) {
+    state.silver.lastAlertAt = now;
 
-  await ctx.reply(`✅ OK. Te anunț când XAG/USD <= ${val}`);
-  await sendWatchStatus(ctx.chat.id);
-});
+    const arrow = targetSide === "above" ? "📈" : "📉";
+    const dir = targetSide === "above" ? "peste" : "sub";
+    await sendOwner(
+      `${arrow} XAG/USD a trecut ${dir} prag!\n` +
+        `Preț: ${formatPrice(price)}\n` +
+        `Prag: ${formatPrice(thr)}\n` +
+        `Mod: ${mode.toUpperCase()}`
+    );
+  }
 
-bot.command("watch_above", async (ctx) => {
-  if (!isOwner(ctx)) return ctx.reply("⛔ Doar owner-ul poate seta tracking-ul.");
-  const parts = ctx.message.text.split(" ").map((s) => s.trim()).filter(Boolean);
-  const val = Number(parts[1]);
-  if (!Number.isFinite(val)) return ctx.reply("Exemplu: /watch_above 30");
+  state.silver.lastCross = nowSide;
+}
 
-  watch.enabled = true;
-  watch.chatId = ctx.chat.id;
-  watch.above = val;
+// interval loop
+setInterval(async () => {
+  try {
+    await checkSilverOnce();
+  } catch (e) {
+    console.error("Silver check error:", e.message);
+  }
+}, Math.max(10, CHECK_INTERVAL_SEC) * 1000);
 
-  await ctx.reply(`✅ OK. Te anunț când XAG/USD >= ${val}`);
-  await sendWatchStatus(ctx.chat.id);
-});
+// --- Commands ---
+bot.on("message", async (msg) => {
+  if (!isOwner(msg)) return;
 
-bot.command("watch_status", async (ctx) => {
-  if (!isOwner(ctx)) return ctx.reply("⛔ Doar owner-ul poate vedea status-ul.");
-  watch.chatId = watch.chatId || ctx.chat.id;
-  await sendWatchStatus(ctx.chat.id);
-});
-
-bot.command("watch_off", async (ctx) => {
-  if (!isOwner(ctx)) return ctx.reply("⛔ Doar owner-ul poate opri tracking-ul.");
-  watch.enabled = false;
-  watch.below = null;
-  watch.above = null;
-  await ctx.reply("🛑 Silver tracking OFF.");
-});
-
-// fallback chat (OpenAI)
-bot.on("text", async (ctx) => {
-  const text = (ctx.message.text || "").trim();
+  const text = (msg.text || "").trim();
   if (!text) return;
 
-  // ignore commands
-  if (text.startsWith("/")) return;
-
   try {
-    const answer = await askOpenAI(text);
-    if (!answer) {
-      return ctx.reply("ℹ️ OPENAI_API_KEY nu e setat. Pot doar tracking /silver_now etc.");
+    if (text === "/start" || text === "start") {
+      return bot.sendMessage(
+        msg.chat.id,
+        "✅ Blinckybot online.\n\nComenzi:\n" +
+          "/silver_on\n/silver_off\n/silver_set 22.50\n/silver_above 22.50\n/silver_below 22.50\n/silver_status\n/silver_now"
+      );
     }
-    await ctx.reply(answer);
-  } catch (e) {
-    console.error("Chat error:", e?.message || e);
-    await ctx.reply("❌ Eroare la răspuns. Verifică OPENAI_API_KEY / logs.");
+
+    if (text.startsWith("/silver_on")) {
+      state.silver.enabled = true;
+      return bot.sendMessage(msg.chat.id, "✅ Silver tracking ON");
+    }
+
+    if (text.startsWith("/silver_off")) {
+      state.silver.enabled = false;
+      return bot.sendMessage(msg.chat.id, "⛔ Silver tracking OFF");
+    }
+
+    if (text.startsWith("/silver_set")) {
+      const n = parseNumberArg(text);
+      if (n === null) return bot.sendMessage(msg.chat.id, "Ex: /silver_set 22.50");
+      state.silver.threshold = n;
+      state.silver.lastCross = null; // reset cross detection
+      return bot.sendMessage(msg.chat.id, `✅ Prag setat: ${formatPrice(n)} USD`);
+    }
+
+    if (text.startsWith("/silver_above")) {
+      const n = parseNumberArg(text);
+      if (n === null) return bot.sendMessage(msg.chat.id, "Ex: /silver_above 22.50");
+      state.silver.mode = "above";
+      state.silver.threshold = n;
+      state.silver.lastCross = null;
+      return bot.sendMessage(
+        msg.chat.id,
+        `✅ Alert când XAG/USD urcă peste ${formatPrice(n)}`
+      );
+    }
+
+    if (text.startsWith("/silver_below")) {
+      const n = parseNumberArg(text);
+      if (n === null) return bot.sendMessage(msg.chat.id, "Ex: /silver_below 22.50");
+      state.silver.mode = "below";
+      state.silver.threshold = n;
+      state.silver.lastCross = null;
+      return bot.sendMessage(
+        msg.chat.id,
+        `✅ Alert când XAG/USD coboară sub ${formatPrice(n)}`
+      );
+    }
+
+    if (text.startsWith("/silver_now")) {
+      const price = await getXagUsd();
+      state.silver.lastPrice = price;
+      return bot.sendMessage(msg.chat.id, `🪙 XAG/USD acum: ${formatPrice(price)}`);
+    }
+
+    if (text.startsWith("/silver_status")) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "📊 Silver status:\n" +
+          `• Tracking: ${state.silver.enabled ? "ON ✅" : "OFF ⛔"}\n` +
+          `• Mod: ${state.silver.mode.toUpperCase()}\n` +
+          `• Prag: ${state.silver.threshold ? formatPrice(state.silver.threshold) : "—"}\n` +
+          `• Ultim preț: ${state.silver.lastPrice ? formatPrice(state.silver.lastPrice) : "—"}\n` +
+          `• Interval: ${Math.max(10, CHECK_INTERVAL_SEC)}s`
+      );
+    }
+
+    // fallback: ignore or help
+    if (text === "/help") {
+      return bot.sendMessage(
+        msg.chat.id,
+        "Comenzi:\n/silver_on\n/silver_off\n/silver_set 22.50\n/silver_above 22.50\n/silver_below 22.50\n/silver_status\n/silver_now"
+      );
+    }
+  } catch (err) {
+    console.error("Message handler error:", err.message);
+    bot.sendMessage(msg.chat.id, "❌ Eroare. Verifică Logs pe Railway.");
   }
 });
 
-// -------------------- launch --------------------
-bot.launch().then(() => console.log("Bot started (polling)."));
-
-// graceful stop
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+// If you ever see TELEGRAM 409 conflict in logs:
+// It means another instance is polling too.
+// Fix: stop other deployments/instances or use webhook mode.
+process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e));
+process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
