@@ -1,52 +1,87 @@
-// ===============================
-// BLINCKYBOT – SILVER TRACKER FREE
+// ========================================
+// BLINCKYBOT PRO
+// Silver Tracker + OpenAI AI Chat
 // Railway safe • Telegram private
-// ===============================
+// ========================================
 
 require("dotenv").config();
+
 const TelegramBot = require("node-telegram-bot-api");
 const fetch = require("node-fetch");
+const OpenAI = require("openai");
 
 // ===== ENV =====
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OWNER_ID = String(process.env.OWNER_ID || "");
+const OWNER_ID = String(process.env.OWNER_ID || "").trim();
 const CHECK_INTERVAL = Number(process.env.CHECK_INTERVAL_SEC || 60);
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
 if (!TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
 if (!OWNER_ID) throw new Error("Missing OWNER_ID");
+if (!OPENAI_KEY) throw new Error("Missing OPENAI_API_KEY");
 
 // ===== TELEGRAM =====
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-console.log("✅ BlinckyBot started. Owner:", OWNER_ID);
+// ===== OPENAI =====
+const openai = new OpenAI({
+  apiKey: OPENAI_KEY,
+});
+
+console.log("✅ BlinckyBot PRO started");
 
 // ===== STATE =====
 let tracking = false;
 let threshold = null;
-let mode = "below"; // below | above
+let mode = "below";
 let lastSide = null;
 
-// ===== PRICE (FREE API) =====
+// =================================
+// SILVER PRICE
+// =================================
 async function getSilverPrice() {
   const res = await fetch("https://api.metals.live/v1/spot/silver");
   const data = await res.json();
-
-  // format: [ { silver: 24.33 } ]
   return Number(data[0].silver);
 }
 
-// ===== SECURITY =====
+// =================================
+// OWNER CHECK
+// =================================
 function isOwner(msg) {
-  return String(msg.chat.id) === OWNER_ID;
+  return String(msg.from?.id) === OWNER_ID;
 }
 
-// ===== ALERT LOOP =====
+// =================================
+// AI FUNCTION
+// =================================
+async function askAI(question) {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a trading assistant. Keep answers short, clear and useful.",
+      },
+      {
+        role: "user",
+        content: question,
+      },
+    ],
+  });
+
+  return completion.choices[0].message.content;
+}
+
+// =================================
+// ALERT LOOP
+// =================================
 setInterval(async () => {
   try {
     if (!tracking || !threshold) return;
 
     const price = await getSilverPrice();
-
     const side = price >= threshold ? "above" : "below";
 
     if (lastSide === null) {
@@ -59,7 +94,7 @@ setInterval(async () => {
 
       await bot.sendMessage(
         OWNER_ID,
-        `${arrow} SILVER ALERT\nPret: ${price}\nPrag: ${threshold}`
+        `${arrow} SILVER ALERT\nPreț: ${price}\nPrag: ${threshold}`
       );
     }
 
@@ -69,70 +104,90 @@ setInterval(async () => {
   }
 }, CHECK_INTERVAL * 1000);
 
-// ===== COMMANDS =====
+// =================================
+// COMMANDS
+// =================================
 bot.on("message", async (msg) => {
-  if (!isOwner(msg)) return;
+  try {
+    if (!isOwner(msg)) return;
 
-  const text = msg.text || "";
+    const text = (msg.text || "").trim();
 
-  // start
-  if (text === "/start") {
-    return bot.sendMessage(
-      OWNER_ID,
-      `BlinckyBot online 🤖
+    // ===== START =====
+    if (text === "/start" || text === "/help") {
+      return bot.sendMessage(
+        msg.chat.id,
+        `🤖 BlinckyBot PRO
 
-Comenzi:
+Silver:
 /silver_on
 /silver_off
 /silver_now
 /silver_above 25
 /silver_below 23
-/status`
-    );
-  }
+/status
 
-  // ON
-  if (text === "/silver_on") {
-    tracking = true;
-    return bot.sendMessage(OWNER_ID, "✅ Tracking ON");
-  }
+AI:
+/ai intrebare ta aici`
+      );
+    }
 
-  // OFF
-  if (text === "/silver_off") {
-    tracking = false;
-    return bot.sendMessage(OWNER_ID, "⛔ Tracking OFF");
-  }
+    // ===== AI CHAT =====
+    if (text.startsWith("/ai ")) {
+      const question = text.replace("/ai ", "");
 
-  // NOW
-  if (text === "/silver_now") {
-    const p = await getSilverPrice();
-    return bot.sendMessage(OWNER_ID, `🪙 Silver: ${p}`);
-  }
+      bot.sendMessage(msg.chat.id, "🤖 Gândesc...");
 
-  // ABOVE
-  if (text.startsWith("/silver_above")) {
-    threshold = Number(text.split(" ")[1]);
-    mode = "above";
-    lastSide = null;
-    return bot.sendMessage(OWNER_ID, `Alert peste ${threshold}`);
-  }
+      const answer = await askAI(question);
 
-  // BELOW
-  if (text.startsWith("/silver_below")) {
-    threshold = Number(text.split(" ")[1]);
-    mode = "below";
-    lastSide = null;
-    return bot.sendMessage(OWNER_ID, `Alert sub ${threshold}`);
-  }
+      return bot.sendMessage(msg.chat.id, answer);
+    }
 
-  // STATUS
-  if (text === "/status") {
-    return bot.sendMessage(
-      OWNER_ID,
-      `Status:
+    // ===== SILVER ON =====
+    if (text === "/silver_on") {
+      tracking = true;
+      return bot.sendMessage(msg.chat.id, "✅ Tracking ON");
+    }
+
+    // ===== SILVER OFF =====
+    if (text === "/silver_off") {
+      tracking = false;
+      return bot.sendMessage(msg.chat.id, "⛔ Tracking OFF");
+    }
+
+    // ===== NOW =====
+    if (text === "/silver_now") {
+      const p = await getSilverPrice();
+      return bot.sendMessage(msg.chat.id, `🪙 Silver: ${p}`);
+    }
+
+    // ===== ABOVE =====
+    if (text.startsWith("/silver_above")) {
+      threshold = Number(text.split(" ")[1]);
+      mode = "above";
+      lastSide = null;
+      return bot.sendMessage(msg.chat.id, `Alert peste ${threshold}`);
+    }
+
+    // ===== BELOW =====
+    if (text.startsWith("/silver_below")) {
+      threshold = Number(text.split(" ")[1]);
+      mode = "below";
+      lastSide = null;
+      return bot.sendMessage(msg.chat.id, `Alert sub ${threshold}`);
+    }
+
+    // ===== STATUS =====
+    if (text === "/status") {
+      return bot.sendMessage(
+        msg.chat.id,
+        `Status:
 Tracking: ${tracking}
 Mode: ${mode}
 Prag: ${threshold || "-"}`
-    );
+      );
+    }
+  } catch (e) {
+    console.log("Message error:", e.message);
   }
 });
