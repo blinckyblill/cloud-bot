@@ -1,3 +1,4 @@
+import fetch from "node-fetch";
 import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
 
@@ -98,6 +99,65 @@ bot.on("message", async (msg)=>{
     model:"gpt-4o-mini",
     messages:[{role:"user",content:msg.text}]
   });
+  let silverInterval = null;
+
+async function getSilverPrice(){
+  const key = process.env.TWELVE_API_KEY;
+
+  const r = await fetch(`https://api.twelvedata.com/price?symbol=XAG/USD&apikey=${key}`);
+  const data = await r.json();
+
+  return Number(data.price);
+}
+
+function startSilver(chatId){
+
+  if(silverInterval) return;
+
+  let lastPrice = null;
+
+  silverInterval = setInterval(async ()=>{
+
+    const price = await getSilverPrice();
+
+    if(!lastPrice){
+      lastPrice = price;
+      return;
+    }
+
+    // STRATEGIE SIMPLA (exemplu)
+    if(price > lastPrice + 0.05){
+      bot.sendMessage(chatId, `🚀 SILVER UP\nPrice: ${price}`);
+    }
+
+    if(price < lastPrice - 0.05){
+      bot.sendMessage(chatId, `🔻 SILVER DOWN\nPrice: ${price}`);
+    }
+
+    lastPrice = price;
+
+  }, 60000); // 1 minut
+
+  bot.sendMessage(chatId, "✅ Silver tracking ON");
+}
+
+function stopSilver(chatId){
+  clearInterval(silverInterval);
+  silverInterval = null;
+  bot.sendMessage(chatId, "⛔ Silver tracking OFF");
+}
+
+bot.onText(/\/silver on/, (msg)=>{
+  if(msg.chat.id !== OWNER_ID) return;
+  startSilver(msg.chat.id);
+});
+
+bot.onText(/\/silver off/, (msg)=>{
+  if(msg.chat.id !== OWNER_ID) return;
+  stopSilver(msg.chat.id);
+});
+
 
   bot.sendMessage(msg.chat.id, r.choices[0].message.content);
 });
+
