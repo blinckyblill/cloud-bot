@@ -1,14 +1,8 @@
 {
-  "name": "blinckybot",
+  "name": "cloud-bot",
   "version": "1.0.0",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
-  },
-  "dependencies": {
-    "node-fetch": "2",
-    "node-telegram-bot-api": "^0.64.0",
-    "dotenv": "^16.4.5"
   }
 }
