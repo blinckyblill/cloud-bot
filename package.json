@@ -1,12 +1,1 @@
-{
-  "name": "cloud-bot",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "dotenv": "^16.0.0",
-    "node-telegram-bot-api": "^0.64.0",
-    "openai": "^4.0.0"
-  }
-}
+{"name":"blinckybill-website-assistant","version":"1.0.0","private":true,"scripts":{"start":"node index.js","test":"node --test"},"engines":{"node":">=22"}}
